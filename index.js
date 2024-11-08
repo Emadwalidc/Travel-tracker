@@ -1,88 +1,117 @@
 import express from "express";
 import bodyParser from "body-parser";
-import pg from "pg";
 import env from "dotenv";
+import { createClient } from '@supabase/supabase-js';
 
+env.config();
+const supabaseUrl = 'https://tzfcrovhmnhllcuvsawk.supabase.co';
+const supabaseKey = process.env.SUPABASE_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
 const app = express();
 const port = 3000;
-env.config();
-
-const db = new pg.Client({
-  user: process.env.PG_USER,
-  host: process.env.PG_HOST,
-  database: process.env.PG_DATABASE,
-  password: process.env.PG_PASSWORD,
-  port: process.env.PG_PORT,
-});
-db.connect();
 
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.static("public"));
 
 let currentUserId = 1;
 
-let users = [
-  { id: 1, name: "Angela", color: "teal" },
-  { id: 2, name: "Jack", color: "powderblue" },
-];
-
+// Fetch visited countries for a user
 async function checkVisisted() {
-  const result = await db.query(
-    "SELECT country_code FROM visited_countries JOIN users ON users.id = user_id WHERE user_id = $1; ",
-    [currentUserId]
-  );
-  let countries = [];
-  result.rows.forEach((country) => {
-    countries.push(country.country_code);
-  });
-  return countries;
+  const { data, error } = await supabase
+    .from('visited_countries')
+    .select('country_code')
+    .eq('user_id', currentUserId);
+
+  if (error) {
+    console.log(error);
+    return [];
+  }
+
+  return data.map(country => country.country_code);
 }
 
+// Get current user details
 async function getCurrentUser() {
-  const result = await db.query("SELECT * FROM users");
-  users = result.rows;
-  return users.find((user) => user.id == currentUserId);
+  const { data, error } = await supabase
+    .from('users')
+    .select('*')
+    .eq('id', currentUserId)
+    .single();
+
+  if (error) {
+    console.log(error);
+    return {};
+  }
+
+  return data;
 }
 
+// Fetch all users for rendering
+async function getAllUsers() {
+  const { data, error } = await supabase
+    .from('users')
+    .select('*');
+
+  if (error) {
+    console.log(error);
+    return [];
+  }
+
+  return data;
+}
+
+// Home route
 app.get("/", async (req, res) => {
   const countries = await checkVisisted();
   const currentUser = await getCurrentUser();
+  const allUsers = await getAllUsers();  // Fetch all users
+
   res.render("index.ejs", {
     countries: countries,
     total: countries.length,
-    users: users,
+    users: allUsers,  // Pass all users to the template
     color: currentUser.color,
   });
 });
 
+// Add a country to visited countries
 app.post("/add", async (req, res) => {
   const input = req.body["country"];
   const currentUser = await getCurrentUser();
 
   try {
-    const result = await db.query(
-      "SELECT country_code FROM countries WHERE LOWER(country_name) LIKE '%' || $1 || '%';",
-      [input.toLowerCase()]
-    );
+    const { data, error } = await supabase
+      .from('countries')
+      .select('country_code')
+      .ilike('country_name', `%${input.toLowerCase()}%`)
+      .single();
 
-    const data = result.rows[0];
-    const countryCode = data.country_code;
-    try {
-      await db.query(
-        "INSERT INTO visited_countries (country_code, user_id) VALUES ($1, $2)",
-        [countryCode, currentUserId]
-      );
-      res.redirect("/");
-    } catch (err) {
-      console.log(err);
+    if (error || !data) {
+      console.log(error);
+      return res.status(404).send("Country not found");
     }
+
+    const countryCode = data.country_code;
+
+    const { error: insertError } = await supabase
+      .from('visited_countries')
+      .insert([ 
+        { country_code: countryCode, user_id: currentUserId }
+      ]);
+
+    if (insertError) {
+      console.log(insertError);
+    }
+
+    res.redirect("/");
   } catch (err) {
     console.log(err);
   }
 });
 
+// Switch user or create a new user
 app.post("/user", async (req, res) => {
-  if(req.body.add === "new"){
+  if (req.body.add === "new") {
     res.render("new.ejs");
   } else {
     currentUserId = req.body.user;
@@ -90,19 +119,30 @@ app.post("/user", async (req, res) => {
   }
 });
 
+// Create a new user
 app.post("/new", async (req, res) => {
   const name = req.body.name;
   const color = req.body.color;
 
-  const result = await db.query(
-    "INSERT INTO users (name, color) VALUES($1, $2) RETURNING *;",
-    [name, color]
-  );
+  const { data, error } = await supabase
+    .from('users')
+    .insert([
+      { name: name, color: color }
+    ])
+    .single();  // .single() ensures it returns a single row
 
-  const id = result.rows[0].id;
-  currentUserId = id;
+  if (error) {
+    console.log(error); // Log the error for debugging
+    return res.redirect("/"); // Redirect to home page even if there is an error
+  }
 
-  res.redirect("/");
+  if (!data) {
+    console.log("No user data returned");
+    return res.redirect("/"); // Redirect to home page if no user data is returned
+  }
+
+  currentUserId = data.id;  // Set the newly created user's ID as the current user
+  res.redirect("/"); // Redirect to home page after successful user creation
 });
 
 app.listen(port, () => {
